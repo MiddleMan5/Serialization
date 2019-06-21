@@ -1,0 +1,39 @@
+---
+Language: Cpp
+BasedOnStyle: google
+AccessModifierOffset: -4
+SortIncludes: true   
+IncludeCategories: 
+  - Regex:           '^"ui_.*\.h"'
+    Priority:        1
+  - Regex:           '^".*\.h"'
+    Priority:        2
+  - Regex:           '^<.*\.h>'
+    Priority:        3
+  - Regex:           '^<.*'
+    Priority:        4
+  - Regex:           '.*'
+    Priority:        5
+UseTab: Never
+BreakBeforeBraces: Allman
+ConstructorInitializerAllOnOneLineOrOnePerLine: true
+BreakConstructorInitializersBeforeComma: false
+IndentWidth: 4
+TabWidth: 4
+ColumnLimit: 120
+NamespaceIndentation: None
+AlignTrailingComments: true
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: true
+AlignOperands: true
+BinPackParameters: false
+BinPackArguments: false
+AllowAllParametersOfDeclarationOnNextLine: true
+AllowShortBlocksOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AlwaysBreakTemplateDeclarations: true
+Standard: C++11
+FixNamespaceComments: true
+CommentPragmas: '^#'

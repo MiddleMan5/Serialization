@@ -1,0 +1,377 @@
+/**
+ * @file    Serializable.icc
+ * @date    May 29 2019
+ * @author  Quinn Mikelson
+ *
+ * @brief   Stores class metadata for serialization between objects and serialized formats.
+ *
+ */
+
+#ifndef SERIALIZABLE_ICC
+#define SERIALIZABLE_ICC
+
+namespace Serializable
+{
+namespace detail
+{
+template <typename T, typename TupleType>
+struct Holder
+{
+    static TupleType members;
+    static std::string name()
+    {
+        return registerName<T>();
+    }
+};
+
+template <typename T, typename TupleType>
+TupleType Holder<T, TupleType>::members{registerMembers<T>()};
+
+template <typename F, typename... Args>
+void for_each_arg(F&& f, Args&&... args)
+{
+    // Waiting for C++17, so I don't have to write silly stuff like this
+    using expand = bool[];
+    (void)expand{(f(std::forward<Args>(args)), true)...};
+}
+
+template <std::size_t N>
+decltype(auto) makeIndexSequence()
+{
+    return std::make_index_sequence<N>();
+}
+
+template <typename F, typename Tuple, std::size_t... I>
+decltype(auto) apply_impl(F&& f, Tuple&& t, std::index_sequence<I...>)
+{
+    return f(std::get<I>(std::forward<Tuple>(t))...);
+}
+
+template <typename F, typename Tuple>
+decltype(auto) apply(F&& f, Tuple&& t)
+{
+    constexpr std::size_t tupleSize = std::tuple_size<std::decay_t<Tuple>>::value;
+    return apply_impl(std::forward<F>(f), std::forward<Tuple>(t), makeIndexSequence<tupleSize>());
+}
+
+template <typename F, typename TupleT>
+void for_tuple(F&& f, TupleT&& tuple)
+{
+    // ambiguity with std::apply
+    Serializable::detail::apply([&f](auto&&... elems) { for_each_arg(f, std::forward<decltype(elems)>(elems)...); },
+                                std::forward<TupleT>(tuple));
+}
+
+template <typename F>
+void for_tuple(F&& /* f */, const std::tuple<>& /* tuple */)
+{ /* do nothing */
+}
+
+template <bool Test, typename F, typename... Args, typename>
+void call_if(F&& f, Args&&... args)
+{
+    f(std::forward<Args>(args)...);
+}
+
+template <bool Test, typename F, typename... Args, typename, typename>
+void call_if(F&& /* f */, Args&&... /* args */)
+{ /* do nothing */
+}
+
+}  // namespace detail
+
+template <typename... Args>
+constexpr auto members(Args&&... args)
+{
+    return std::make_tuple(std::forward<Args>(args)...);
+}
+
+template <class class_type>
+constexpr auto registerMembers()
+{
+    return std::make_tuple();
+}
+
+template <class class_type>
+inline auto registerName()
+{
+    return "";
+}
+
+template <class class_type>
+constexpr auto getName()
+{
+    return detail::Holder<class_type, decltype(registerMembers<class_type>())>::name();
+}
+
+template <class class_type>
+constexpr std::size_t getMemberCount()
+{
+    return std::tuple_size<decltype(registerMembers<class_type>())>::value;
+}
+
+template <class class_type>
+const auto& getMembers()
+{
+    return detail::Holder<class_type, decltype(registerMembers<class_type>())>::members;
+}
+
+template <class class_type>
+constexpr bool isRegistered()
+{
+    return !std::is_same<std::tuple<>, decltype(registerMembers<class_type>())>::value;
+}
+
+// TypeList is array of types
+template <typename... Args>
+struct TypeList
+{
+    template <std::size_t N>
+    using type = std::tuple_element_t<N, std::tuple<Args...>>;
+
+    using indices                     = std::index_sequence_for<Args...>;
+    static constexpr std::size_t size = sizeof...(Args);
+};
+
+// Check if class_type has non-default ctor registered
+template <class class_type>
+constexpr bool ctorRegistered()
+{
+    return !std::is_same<TypeList<>, constructor_arguments<class_type>>::value;
+}
+
+template <class class_type>
+bool hasMember(const std::string name)
+{
+    bool found = false;
+    doForAllMembers<class_type>([&found, &name](const auto& member) {
+        if (!strcmp(name, member.getName()))
+        {
+            found = true;
+        }
+    });
+    return found;
+}
+
+template <class class_type, typename F, typename>
+void doForAllMembers(F&& f)
+{
+    detail::for_tuple(std::forward<F>(f), getMembers<class_type>());
+}
+
+// version for non-registered classes (to generate less template stuff)
+template <class class_type, typename F, typename, typename>
+void doForAllMembers(F&& /*f*/)
+{
+    // do nothing! Nothing gets generated
+}
+
+template <class class_type, typename value_type, typename F>
+void doForMember(const std::string name, F&& f)
+{
+    doForAllMembers<class_type>([&](const auto& member) {
+        if (!strcmp(name, member.getName()))
+        {
+            using MemberT = get_member_type<decltype(member)>;
+            assert((std::is_same<MemberT, value_type>::value) && "Member doesn't have type value_type");
+            detail::call_if<std::is_same<MemberT, value_type>::value>(std::forward<F>(f), member);
+        }
+    });
+}
+
+template <typename value_type, class class_type>
+value_type getMemberValue(class_type& obj, const std::string name)
+{
+    value_type value;
+    doForMember<class_type, value_type>(name, [&value, &obj](const auto& member) { value = member.getCopy(obj); });
+    return value;
+}
+
+template <typename value_type, class class_type, typename V, typename>
+void setMemberValue(class_type& obj, const std::string name, V&& value)
+{
+    doForMember<class_type, value_type>(
+        name, [&obj, value = std::forward<V>(value)](const auto& member) { member.set(obj, value); });
+}
+
+template <class class_type, typename value_type>
+Member<class_type, value_type>::Member(std::string name_in, member_pointer<class_type, value_type> ptr_in)
+    : name(name_in),
+      ptr(ptr_in),
+      has_member_ptr(true),
+      ref_getter_ptr(nullptr),
+      ref_setter_ptr(nullptr),
+      val_getter_ptr(nullptr),
+      val_setter_ptr(nullptr),
+      mutable_ref_getter_ptr(nullptr)
+{
+}
+
+template <class class_type, typename value_type>
+Member<class_type, value_type>::Member(std::string name_in,
+                                       ref_getter_func_ptr_t<class_type, value_type> getter_ptr,
+                                       ref_setter_func_ptr_t<class_type, value_type> setter_ptr)
+    : name(name_in),
+      ptr(nullptr),
+      has_member_ptr(false),
+      ref_getter_ptr(getter_ptr),
+      ref_setter_ptr(setter_ptr),
+      val_getter_ptr(nullptr),
+      val_setter_ptr(nullptr),
+      mutable_ref_getter_ptr(nullptr)
+{
+}
+
+template <class class_type, typename value_type>
+Member<class_type, value_type>::Member(std::string name_in,
+                                       val_getter_func_ptr_t<class_type, value_type> getter_ptr,
+                                       val_setter_func_ptr_t<class_type, value_type> setter_ptr)
+    : name(name_in),
+      ptr(nullptr),
+      has_member_ptr(false),
+      ref_getter_ptr(nullptr),
+      ref_setter_ptr(nullptr),
+      val_getter_ptr(getter_ptr),
+      val_setter_ptr(setter_ptr),
+      mutable_ref_getter_ptr(nullptr)
+{
+}
+
+template <class class_type, typename value_type>
+Member<class_type, value_type>& Member<class_type, value_type>::addMutableGetter(
+    mutable_ref_getter_func_ptr_t<class_type, value_type> ptr_in)
+{
+    this->mutable_ref_getter_ptr = ptr_in;
+    return *this;
+}
+
+template <class class_type, typename value_type>
+const value_type& Member<class_type, value_type>::get(const class_type& obj) const
+{
+    if (this->ref_getter_ptr)
+    {
+        return (obj.*this->ref_getter_ptr)();
+    }
+    else if (this->has_member_ptr)
+    {
+        return obj.*ptr;
+    }
+    throw std::runtime_error("Cannot return const ref to member: no getter or member pointer set");
+}
+
+template <class class_type, typename value_type>
+value_type Member<class_type, value_type>::getCopy(const class_type& obj) const
+{
+    if (this->ref_getter_ptr)
+    {
+        return (obj.*this->ref_getter_ptr)();
+    }
+    else if (this->val_getter_ptr)
+    {
+        return (obj.*this->val_getter_ptr)();
+    }
+    else if (this->has_member_ptr)
+    {
+        return obj.*ptr;
+    }
+    throw std::runtime_error("Cannot return copy of member: no getter or member pointer set");
+}
+
+template <class class_type, typename value_type>
+value_type& Member<class_type, value_type>::getRef(class_type& obj) const
+{
+    if (mutable_ref_getter_ptr)
+    {
+        return (obj.*mutable_ref_getter_ptr)();
+    }
+    else if (this->has_member_ptr)
+    {
+        return obj.*ptr;
+    }
+    throw std::runtime_error("Cannot return ref to member: no getter or member pointer set");
+}
+
+template <class class_type, typename value_type>
+member_pointer<class_type, value_type> Member<class_type, value_type>::getPtr() const
+{
+    if (hasPtr())
+    {
+        return ptr;
+    }
+    throw std::runtime_error("Cannot get pointer to member: it wasn't set");
+}
+
+template <class class_type, typename value_type>
+template <typename V, typename>
+void Member<class_type, value_type>::set(class_type& obj, V&& value) const
+{
+    // TODO: add rvalueSetter?
+    if (this->ref_setter_ptr)
+    {
+        (obj.*this->ref_setter_ptr)(value);
+    }
+    else if (this->val_setter_ptr)
+    {
+        (obj.*this->val_setter_ptr)(value);  // will copy value
+    }
+    else if (this->has_member_ptr)
+    {
+        obj.*ptr = value;
+    }
+    else
+    {
+        throw std::runtime_error("Cannot access member: no setter or member pointer set");
+    }
+}
+
+template <typename Class, typename T>
+Member<Class, T> make_member(const char* name, T Class::*ptr)
+{
+    return Member<Class, T>(name, ptr);
+}
+
+template <typename Class, typename T>
+Member<Class, T> make_member(const char* name,
+                             ref_getter_func_ptr_t<Class, T> getter_ptr,
+                             ref_setter_func_ptr_t<Class, T> setter_ptr)
+{
+    return Member<Class, T>(name, getter_ptr, setter_ptr);
+}
+
+template <typename Class, typename T>
+Member<Class, T> make_member(const char* name,
+                             val_getter_func_ptr_t<Class, T> getter_ptr,
+                             val_setter_func_ptr_t<Class, T> setter_ptr)
+{
+    return Member<Class, T>(name, getter_ptr, setter_ptr);
+}
+
+// read only
+template <typename Class, typename T>
+Member<Class, T> make_member(const char* name, ref_getter_func_ptr_t<Class, T> getter_ptr)
+{
+    return Member<Class, T>(name, getter_ptr, nullptr);
+}
+
+template <typename Class, typename T>
+Member<Class, T> make_member(const char* name, val_getter_func_ptr_t<Class, T> getter_ptr)
+{
+    return Member<Class, T>(name, getter_ptr, nullptr);
+}
+
+// set only
+template <typename Class, typename T>
+Member<Class, T> make_member(const char* name, ref_setter_func_ptr_t<Class, T> setter_ptr)
+{
+    return Member<Class, T>(name, nullptr, setter_ptr);
+}
+
+template <typename Class, typename T>
+Member<Class, T> make_member(const char* name, val_setter_func_ptr_t<Class, T> setter_ptr)
+{
+    return Member<Class, T>(name, nullptr, setter_ptr);
+}
+
+}  // namespace Serializable
+
+#endif
